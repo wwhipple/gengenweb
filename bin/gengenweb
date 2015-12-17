@@ -1,0 +1,260 @@
+#!/usr/bin/perl -w
+
+####################################################################
+# gengenweb -- Generate a genweb
+# Before beginning, create ~genweb/genweb/whipple.org and copy
+# images and incs there! (Gedcom should be in ~genweb/scratch)
+
+use strict;
+use Getopt::Long;
+
+use constant DEFAULT_SCRATCH_DIR  => 'scratch'; # Beneath HOME dir
+use constant DEFAULT_CLEAN_SUFFIX => 'a';       # Add 'a' to input file
+
+my $opts = validate_options();
+my $ret = clean_ged($opts);       # Clean the gedcom 
+$ret = gengenweb($opts);
+if ($ret) {
+    die "Nonzero return code $ret from ged2html\n";
+}
+
+$ret = insert_soundex_meta($opts);
+
+print "Generation complete.\n"
+
+exit;
+
+###########################################################
+# ;clean_ged - Clean out private info
+sub clean_ged {
+    my $opts = shift;
+    if ($opts->{'noclean'} {
+        return;
+    }
+
+    # TODO: Eliminate this hard-coded call
+    chdir "$opts->{'scratch'}" 
+        or die "Can't cd to $opts->{'scratch'}\n";
+    return system("/home/genweb/bin/cleanged $opts->{'cleaned'} $opts->{'cleaned'}");
+}
+
+###########################################################
+# ;gengenweb - Generate the genweb (calling ged2html)
+sub gengenweb {
+    my $opts = shift;
+    # CASE_FOLD_LINKS=NONE|LOWER
+
+    # TODO: Separate args with commas to skip calling via shell
+    return system("$opts->{'homedir'}/bin/ged2html " 
+        . "-D TEMPLATE_FILE=$opts->{'homedir'}/ged2html/genweb.g2h "
+        . "-D DESTINATION_DIRECTORY=$opts->{'homedir'}/new/genweb.whipple.org "
+        . "-D HOMEPAGE=http://genweb.whipple.org "
+        . "-D MAILTO=webmaster\@whipple.org -D CASE_FOLD_LINKS=NONE "
+        . "-D FILES_PER_DIRECTORY=250 -D INDIVIDUALS_PER_FILE=0 "
+        . "-D PEDIGREE_DEPTH=5 -D GENERATE_GENDEX=0 "
+        . "-D STABLE_FILENAMES=0 -D CONT_MEANS_BREAK=0 "
+        . "-D UPPER_CASE_SURNAMES=0 -D SURNAME_WIDTH=160 "
+        . "-D INDEX_WIDTH=75 "
+        . "-D OUTPUT_PROGRAM=$opts->{'homedir'}/ged2html/genweb.g2h "
+        . " -D FAMILY_GROUPS=0 $opts->{'cleaned'}");
+}
+
+#######################################################
+# ;insert_soundex_meta - Index soundex meta tags
+sub insert_soundex_meta {
+    my $opts = shift;
+    chdir "$opts->{'homedir'}/new/genweb.whipple.org"
+         or die "Can't cd to $opts->{'homedir'}/new/genweb.whipple.org.\n";
+
+    system("$opts->{'homedir'}/bin/soundex5 $opts->{'homedir'}/new/genweb.whipple.org");
+}
+
+###########################################################
+# ;validate_options - Get and validate all the options
+sub validate_options {
+    my $opts = { };
+    # First the real options
+    unless (GetOptions (
+        'help'        => \$opts->{'help'},
+        'input-ged=s' => \$opts->{'input'},
+        'cleaned-ged' => \$opts->{'cleaned'},
+        'scratch-dir' => \$opts->{'scratch'},
+        'noclean'     => \$opts->{'noclean'},  
+    )) {
+        system("/usr/bin/pod2text $0 | less -e");
+        exit;
+    }
+    # Then positional arguments (the old way)
+    if ((scalar(@ARGV) == 2) && !scalar(keys %{$opts})) {
+        $opts->{'input'} = $ARGV[0];
+        $opts->{'cleaned'} = $ARGV[1];   
+    }
+
+    # If no options or parms specified, or if we don't know the name
+    # of the input file ...
+    if (!scalar(keys %{$opts}) || !exists($opts->{'input'})) {
+        system("/usr/bin/pod2text $0 | less -e");
+        exit;
+    }
+
+    # Input and output files can't be the same
+    unless ($opts->{'noclean'}) {
+        if ($opts->{'cleaned'} eq $opts->{'input'}) {
+            die "Name of input file and file for intermediate \"cleaned\" "
+                . "GEDCOM file can't be the same.\n";
+    }
+
+    # Where is the home directory?
+    my $homedir = '';
+    my $uid = $<;               # My uid
+    ($homedir) = (getpwuid($uid))[7];
+    
+    # Set defaults if not specified
+    unless (exists $opts->{'scratch'}) {
+        $opts->{'scratch'} = DEFAULT_SCRATCH_DIR;
+    }
+
+    # Does scratch directory exist in file system?
+    if (!-d $opts->{'scratch'}) {
+        if (-d "$homedir/$opts->{'scratch'}") {
+            # The scratch directory exists beneath $HOME
+            $opts->{'scratch'} = "$homedir/$opts->{'scratch'}";
+        }
+    }
+
+    # Verify that input file exists
+    if (!-e $opts->{'input'}) {
+        # Is input file in the scratch directory
+        if (-e "$opts->{'scratch'}/$opts->{'input'}") {
+            $opts->{'input'} = "$opts->{'scratch'}/$opts->{'input'}";
+        }
+        elsif (-e "$opts->{'home'}/$opts->{'input'}") {
+            $opts->{'input'} = "$opts->{'home'}/$opts->{'input'}";
+        }
+        else {
+            die "Input file $opts->{'input'} does not exist.\n";
+        }
+    }
+
+    # Construct an intermediate cleaned GEDCOM output file name if not specified
+    my $sfx = DEFAULT_CLEAN_SUFFIX;
+    unless ($opts->{'noclean'}) {
+        if (!exists($opts->{'cleaned'}) 
+            || ($opts->{'cleaned'} eq $opts->{'input'}))  {
+            # Try to construct one based on the input file name
+            my $opts->{'cleaned'} = $opts->{'input'};
+            $opts->{'cleaned'} =~ s/^(.+?)\.ged/$1${sfx}.ged/;
+        }
+        
+        # Handle input files that don't end in *.ged as well as
+        # user-specified output file that is the same as the input file
+        if ($opts->{'cleaned'} eq $opts->{'input'}) {
+            $opts->{'cleaned'} .= $sfx; # Just tack it on the end
+        }
+    }
+
+    # If the intermediate output file exists, die.
+    if (-e $opts->{'cleaned'}) {
+        die "Output (cleaned) GEDCOM file $opts->{'cleaned'} already exists.\n";
+    }
+
+    $opts->{'homedir'} = $homedir;
+
+    return $opts;
+}
+
+sub gen_indexes {
+    my $opts = shift;
+    chdir "$opts->{'homedir'}/new/indices" 
+        or die "Can't cd to $opts->{'homedir'}/new/indices/\n";
+
+    return system("/usr/bin/swish-e -W0 -c genweb.conf");
+}
+
+#chdir "/home/genweb"
+#    or die "Can't cd to /home/genweb/\n";
+
+#if (-e "genweb.whipple.org.tgz") {
+#    rename "genweb.whipple.org.tgz", "genweb.whipple.org.old.tgz";
+#}
+
+#system("/usr/bin/tar -cvzf genweb.whipple.org.tgz genweb.whipple.org");
+
+
+__END__
+
+=head1 NAME
+
+gengenweb - Generate a Genealogical Web Site
+
+=head1 SYNOPSIS
+
+B<gengenweb>  gedcomfilename intermediatefilename
+
+B<gengenweb>  --input-gedcom=<filename> [options]
+
+=head1 DESCRIPTION
+
+Provided the name of an input GEDCOM file, generate a genealogical web
+site, "privatizing" data about living individuals by default. Index
+the site for searching by swish-e (using optional soundex and other
+features).
+
+=head1 OPTIONS
+
+Options are introduced by either 1 or 2 hyphens. They may be shortened
+to a unique prefix.
+
+B<--input-gedcom=E<lt>file-nameE<gt>>
+
+=over 4
+
+Specifies the name of the input GEDCOM file. The file is assumed to
+exist located in a scratch directory (see below).
+
+=back
+
+B<--cleaned-ged=E<lt>file-nameE<gt>>
+
+=over 4 
+
+Specifies where B<gengenweb> should write the intermediate GEDCOM file
+that has been privatized to exclude dates and places (and other
+information) about living individuals.
+
+If the B<--no-clean> option is specified, the B<--cleaned-ged> option
+is ignored.
+
+=back
+
+B<--scratchdir=E<lt>directory-nameE<gt>>
+
+=over 4
+
+Specifies the complete path of a scratch directory where the input
+GEDCOM file is located, as well as where the cleaned GEDCOM file will
+be written.
+
+If not specified, the directory name defaults to a directory named
+scratch that exists in the invoker's home directory (~/scratch).
+
+=back
+
+B<--no-clean> 
+
+=over 4
+
+Skip the "privatizing" step, leaving dates, places, and other personal
+information about living individuals.
+
+(This is not recommended for web sites on the public internet.)
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (C) 2014 Weldon Whipple. All Rights Reserved.
+
+
+
+

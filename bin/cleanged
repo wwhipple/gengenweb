@@ -1,0 +1,249 @@
+#!/usr/bin/perl -w
+#	Clean a GEDCOM file, removing all dates and places relating
+#	to anyone still living (indicated by a NOTE reading "!ALIVE").
+#	In the process, eliminate all traces of LDS ordinance
+#	information
+use strict;
+use Getopt::Long;
+
+my $curRIN = 0;			# Current RIN Number
+my @curMRIN = ();
+my @prevMRIN = ();
+
+my %isLivingRIN = ();		
+my %isLivingMRIN = ();
+my %isPrivateRIN = ();		# Don't output this RIN at all
+my %isPrivateMRIN = ();		# Marriage associated with private RIN
+
+my $allprivate = 0;		# Treat alive as living, private as private
+my $help = 0;
+
+# Get options, if specified
+unless (GetOptions(
+                   'private'      => \$allprivate,  # Treat all living as private (deleted)
+                   'help'         => \$help,        # Show help
+	)) { 
+    usage(); 
+    exit; 
+}
+
+if ($help) {
+    usage();
+}
+
+unless (scalar(@ARGV) == 2) {
+    die "Syntax: cleanged [--private] <InputFile> <OutputFile>\n";
+}
+
+my ($inFile, $outFile) = @ARGV;
+
+print "Processing file $inFile ...\n";
+	                             
+open (INFILE, "$inFile")
+    or die "Unable to open input file $inFile: $!\n";
+
+#########################################################
+# F I R S T   P A S S
+# Make an initial pass through the input file, recording families
+# where at least one of the spouses is living as well as living
+# individuals
+
+$curRIN = 0;
+@curMRIN = ();
+while (<INFILE>) {
+    chomp;
+    if ( m/^0 \@I(\d+)/ ) {
+	$curRIN = $1;
+	@curMRIN = ();		# Reset marriages.
+    }
+    # The FAMS line
+    elsif ( m/^1 FAMS \@F(\d+)/ ) {
+	push(@curMRIN, $1);
+    }
+    elsif ( m/^(1 NOTE|2 CONT) !PRIVATE/ ) {
+	$isPrivateRIN{$curRIN} = 1;
+	foreach my $mrin (@curMRIN) { # Mark all of this person's marriages private
+	    $isPrivateMRIN{$mrin} = 1; # Mark marriage living
+	}
+    }
+    elsif ( m/^(1 NOTE|2 CONT) !ALIVE/ ) {
+	if ($allprivate) {		# if treating all !ALIVE as !PRIVATE ...
+	    $isPrivateRIN{$curRIN} = 1;
+	    foreach my $mrin (@curMRIN) {
+		$isPrivateMRIN{$mrin} = 1; # Mark marriage private
+	    }
+	}
+	else {			# Treat all !ALIVE as living (only)
+	    $isLivingRIN{$curRIN} = 1;
+	    foreach my $mrin (@curMRIN) {
+		$isLivingMRIN{$mrin} = 1; # Mark marriage living
+	    }
+	}
+    }
+    # When we hit the first 0-level family, we're done with individuals
+    # We can quit our pre-scan
+    elsif ( m/^0 \@F\d+\@ FAM/) {
+	last;			# Sayonara
+    }
+}
+
+######################################################################
+# S E C O N D   P A S S 
+# We've read through the file once. We have marked as living all RINs that are
+# !ALIVE or whose spouse is alive.
+# OK, Now we're ready to process the input file again, cleaning it up as we output 
+# Go back to the beginning of the file 
+seek(INFILE,0,0);
+open (OUTFILE, ">$outFile")
+    or die "Unable to open output file $outFile: $!\n";
+
+$curRIN = 0;
+my $prevRIN = 0;
+my $curMRIN = 0;		# A scalar for this loop
+my $prevMRIN = 0;
+my $deletingBlock = 0;
+my $cur0LevelBlock = "";	# The current 0-level block
+
+while (<INFILE>) {
+#    chomp;
+
+    # This test is in a 0 @Fn@ FAM block (bottom of file)
+    if ( m/^1 (HUSB|WIFE|CHIL) \@I(\d+)/ ) { # A Family member?
+	if ($isPrivateRIN{$2}) {
+	    next;		# Omit this person from the family altogether
+	}
+    }
+
+    # Handle case where a !LIVING spouse is married to three !PRIVATE individuals
+    # (as Anthea is). We don't want any of those families to appear
+    if ( m/^1 FAMS \@F(\d+)\@/ ) {
+	if ($isPrivateMRIN{$1}) { # Private because spouses are !PRIVATE
+	    next;
+	}
+    }
+
+    #########################################################
+    # S T A R T   O F   I N D I V I D U A L   B L O C K
+    if ( m/^0 \@I(\d+)/ ) {	# If this is the start of an individual ...
+	$prevRIN = $curRIN;
+	$curRIN = $1;		# Save the RIN
+	# If previous RIN was alive, output a note for her/him:
+	if ($isLivingRIN{$prevRIN}) {
+	    $cur0LevelBlock .= "1 NOTE Living individual or close relative of "
+		. "a living individual--personal information withheld.\n";
+	}
+	unless ($isPrivateRIN{$prevRIN}) {
+	    print OUTFILE $cur0LevelBlock;
+	}
+
+	if ($isPrivateRIN{$curRIN}) {
+	    $deletingBlock = 1;	# We'll delete this individual block
+	    $cur0LevelBlock = '';
+	}
+	else {
+	    $deletingBlock = 0;	# This person isn't private; won't delete
+	    $cur0LevelBlock = "$_"; # Start a new 0-level block
+	}
+
+	next;
+    }
+
+    ############################################################
+    # S T A R T   O F   F A M I L Y   B L O C K
+    elsif ( m/^0 \@F(\d+)/ ) {	# This starts a family block
+	$prevMRIN = $curMRIN;
+	$curMRIN = $1;		# Save the MRIN
+	# Print out the (previous) 0-Level block unless this is the very
+	# first Family record encountered and the final Individual record was
+	# marked Private.
+	# (This is doing for the final INDI record what the above if statement
+	# --for individuals--does for all but the last INDI block.)
+	if (($prevMRIN == 0) && (!$isPrivateRIN{$curRIN})) {
+	    print OUTFILE $cur0LevelBlock;
+	}
+	# Otherwise this is the start of the 2nd+ FAMILY BLOCK
+	elsif (length($cur0LevelBlock)) {
+	    print OUTFILE $cur0LevelBlock;
+	}
+	$deletingBlock = 0;
+	$cur0LevelBlock = "$_"; # Start a new 0-level block
+    }
+
+    # These signal the start of subblocks to be deleted
+    elsif ( ((m/^1 (BIRT|DEAT|BURI|CHR|NOTE)/) && $isLivingRIN{$curRIN}) # Occurs in INDIVIDUAL BLOCK
+	    || ((m/^1 (MARR|DIV)/) && ($isLivingMRIN{$curMRIN} || $isPrivateMRIN{$curMRIN})) # Occurs in FAMILY BLOCK; DIV is block of one line
+	    || ( m/^1 (BAPL|ENDL|SLGC|SLGS)/)
+	    || (m/^(1 NOTE|2 CONT) !(BLESSING|SSN|BAPTISM|PATRIARCHAL|ADDRESS|DEACON|TEACHER|PRIEST|ELDER|HIGH_PRIEST|MISSION)/)
+	    || (m/^2 SLGC/)) {
+        $deletingBlock = 1;
+	next;
+    }
+
+    # A leading 0 or 1 signals the end of a block being deleted.
+    elsif ($deletingBlock) {	# Used to be deleting block
+        if ( m/^(0|1) / ) {	# Not any more (back to 0 or 1)
+            $deletingBlock = 0;
+	    $cur0LevelBlock .= $_;
+            next;
+        }
+        else {                  # Continuation of block to delete
+            next;               # Don't print out to next file
+        }
+    }
+
+    else {
+	$cur0LevelBlock .= $_;
+	next;
+    }
+}
+
+# Handle the very last (Family) in the file
+if (length($cur0LevelBlock)) {	# Assumes that families are last in GEDCOM
+    print OUTFILE $cur0LevelBlock;
+}
+     
+close(INFILE);
+close(OUTFILE);
+
+print "Obfuscating e-mail addresses in file $outFile ...\n";
+
+# Now obfuscate e-mail addresses 1.2@3.4.5
+#system("perl", "-pi", "-e", 's/([-\w\d_]+)\.([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)\.([-\w\d_]+)/$1 dot $2 at $3 dot $4 dot $5/g', "$outFile");
+# Now obfuscate e-mail addresses 1.2@3.4
+#system("perl", "-pi", "-e", 's/([-\w\d_]+)\.([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)/$1 dot $2 at $3 dot $4/g', "$outFile");
+# Now obfuscate e-mail addresses 1@.2.3.4
+#system("perl", "-pi", "-e", 's/([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)\.([-\w\d_]+)/$1 at $2 dot $3 dot $4/g', "$outFile");
+# Now obfuscate e-mail addresses 1@2.3
+#system("perl", "-pi", "-e", 's/([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)/$1 at $2 dot $3/g', "$outFile");
+
+system("perl", "-pi", "-e", 's/([-\w\d_]+)\.([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)\.([-\w\d_]+)/undisclosed at example dot net/g', "$outFile");
+# Now obfuscate e-mail addresses 1.2@3.4
+system("perl", "-pi", "-e", 's/([-\w\d_]+)\.([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)/undisclosed at example dot net/g', "$outFile");
+# Now obfuscate e-mail addresses 1@.2.3.4
+system("perl", "-pi", "-e", 's/([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)\.([-\w\d_]+)/undisclosed at example dot net/g', "$outFile");
+# Now obfuscate e-mail addresses 1@2.3
+system("perl", "-pi", "-e", 's/([-\w\d_]+)\@([-\w\d_]+)\.([-\w\d_]+)/undisclosed at example dot net/g', "$outFile");
+
+exit;
+
+
+sub usage {
+    print << "_USAGE_";
+
+Usage: $0 [--private] <input-gedcom> <output-gedcom>
+
+where:
+   input-gedcom   is the name of a GEDCOM file to be "privatized."
+                  (The file is in directory /home/genweb.)
+   output-gedcom  is the name to give the generated GEDCOM file
+                  that has been privatized. (The file will be
+		  created in directory /home/genweb.)
+   
+Options (preceded by 1 or 2 hyphens; OK to abbreviate to the
+shortest unique prefix):
+   -p, --private  Treat !ALIVE (in notes) as if it were !PRIVATE
+                  (removing those individuals from the generated
+		  GEDCOM file).
+
+_USAGE_
+}

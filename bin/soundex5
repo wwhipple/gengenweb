@@ -1,0 +1,479 @@
+#!/usr/bin/perl -w
+
+use strict;
+use Text::Soundex;
+use URI::Escape;
+use Getopt::Long;
+
+my $baseDir;
+my @dirs;
+my $ddir;
+my @Ifiles;
+my $ifile;
+my @lines;
+my $oneline;
+my $dateline;			# Date metatags
+my $placeline;			# Place metatags
+my $allplaces;			# All places concatenated together
+# Places for google maps
+# Can be multiple marriage places.
+my %markermap = (
+    'BIRTH'          => 'B',
+    'CHRISTENING'    => 'C',
+    'MARRIAGE'       => 'M',
+    'DEATH'          => 'D',
+    'BURIAL'         => 'X',
+    );
+
+my $county_test = '';
+
+unless (GetOptions(
+		   'county'  => \$county_test,
+		   )) {
+    print "Invalid option specified\n";
+    exit;
+}
+
+if ($county_test) {
+    my ($metaplace, $googmarker, $curgoogplace) = processPlace('<li><em>DEATH</em>: 12 Dec 1873, , Decatur, Indiana');
+    exit;
+}
+
+print "Starting soundex tag generation ...\n";
+
+if ($#ARGV == -1) {
+    # Use current directory as directory to read from
+    die "Specify the base directory (directory of ged2html output)\n";
+}
+elsif ($#ARGV == 0) {
+    if ($ARGV[0] eq "?") {
+	die "Syntax: soundex <base_dir>\n\twhere base_dir is directory of ged2html output\n";
+    }
+    else {
+	# If input arg doesn't end in a slash, add one
+	$baseDir = $ARGV[0];
+	chdir($baseDir) or die "Cannot change to directory $baseDir\n";
+
+	@dirs = <d????>;
+	
+	foreach $ddir (@dirs) {
+	    print "Soundexing directory $ddir ...\n";
+	    chdir $ddir;	# Change to next subdir
+	    @Ifiles = <I*html>;
+	    foreach $ifile (@Ifiles) {
+		#print "Soundexing file $ifile ...\n";
+		open(INFILE, "$ifile") or die "Cannot open file $ifile\n";
+		@lines = <INFILE>;
+		close(INFILE);
+		open(OUTFILE, ">$ifile") or die "Cannot write to file $ifile\n";
+
+		# Look through the the file once, looking for birth, christening, death or burial dates
+		# Also look for places ... for google maps (9/20/2009)
+		my $prevDateType = "";
+		my $prevmetadate = "";
+		my $metadate = "";
+		my $dateType = "";
+		my $dateTags = "";
+		my $metaplace = "";
+		my $placeTags = "";
+		$allplaces = "";
+
+		my $googcenterplace = ''; # Where will map be centered?
+		my $googcenter_event_type = ''; # What kind of event is center event?
+		my $allgoogmarkers = ''; # The marker strings concatenated together
+		my %mapplacehash = ();	 # For zoomable map
+	        DATELINE:
+		foreach $dateline (@lines) {
+		    my $processAs = "";
+		    $prevmetadate = $metadate;
+		    $prevDateType = $dateType;
+		    if ($dateline =~ /^<li><em>(BIRTH|CHRISTENING|MARRIAGE|DEATH|BURIAL)<\/em>:/i) {
+			$dateType = $1;   #
+			# Process christening only if no birth date
+			if ($dateType =~ /^CHRISTENING$/) {
+			    if (($prevDateType =~ /^BIRTH$/)
+				&& ($prevmetadate !~ /^\s*$/)) {
+				next DATELINE;
+			    }
+			    else {
+#				$dateline =~ s/CHRISTENING/BIRTH/;
+				$processAs = 'BIRTH';
+			    }
+			}
+			# Process burial only if no death date
+			if ($dateType =~ /^BURIAL$/) {
+			    if (($prevDateType =~ /^DEATH$/)
+				&& ($prevmetadate !~ /^\s*$/)) {
+				next DATELINE;
+			    }
+			    else {
+#				$dateline =~ s/BURIAL/DEATH/;
+				$processAs = 'DEATH';
+			    }
+			}
+                        if ($dateType =~ /^MARRIAGE$/) {
+                            $processAs = 'MARRIAGE';
+                        }
+			$metadate = &processDate($dateline, $processAs);
+			if ($metadate !~ m/^\s*$/) {
+#			    print OUTFILE "$metadate";
+			    $dateTags .= "$metadate";
+			}
+		    }
+		}
+
+		# Now look again for place lines ... for google maps
+	        PLACELINE:
+		foreach $placeline (@lines) {
+		    my $eventtype = '';
+		    my $googmarker = '';
+		    my $curgoogplace = '';
+		    if ($placeline =~ /^<li><em>(BIRTH|CHRISTENING|MARRIAGE|DEATH|BURIAL)<\/em>:/i) {
+			$eventtype = $1;
+			($metaplace, $googmarker, $curgoogplace) = processPlace($placeline);
+			if ($metaplace !~ m/^\s*$/) {
+			    $placeTags .= "$metaplace";
+			}
+			if ($curgoogplace !~ m/^\s*$/) {
+			    # Map place hash example: Logan,Cache,Utah => M
+			    $mapplacehash{$curgoogplace} = $markermap{$eventtype};
+			    $allgoogmarkers .= $googmarker; # Add current goog marker to string
+			    # If the center google place is empty, make it this one
+			    if (! length($googcenterplace)) {
+				$googcenterplace = $curgoogplace;
+				$googcenter_event_type = $eventtype;
+			    }
+			    else {
+				($googcenterplace, $googcenter_event_type) 
+				    = most_relevant_place($googcenterplace, 
+				      $googcenter_event_type, $curgoogplace, $eventtype);
+			    }
+			}
+		    }
+		}
+
+		# Construct the line for Google Maps:
+		my $googmapsoutline = "</div></div>";
+		if (defined($allgoogmarkers) && length($allgoogmarkers) 
+		    && defined($googcenterplace) && length($googcenterplace)) {
+		    $googmapsoutline = "</div>\n<div id=\"map_canvas\" style=\"width: 400px; height: 400px; filter: alpha(opacity=80); opacity: 0.80;\"><img border=\"0\" src=\"http://maps.google.com/maps/api/staticmap?center=${googcenterplace}&zoom=9&size=400x400${allgoogmarkers}&key=ABQIAAAAYHJgs9tZtjUwceKaExGARhQQaWGGOMtDWGmh7Aon-uxKHLcfkRQaWpfPk15sv122Pj8eduHh5QefDQ&sensor=false\" alt=\"\" /></div></p></div>";
+		}
+
+		my $didDates = 0;
+		foreach $oneline (@lines) {
+		    # Before processing meta tags, look for a quick link
+		    # line, and remove I before rin number:
+		    if ($oneline =~ m/Quick link to this/) {
+			$oneline =~ s|(<p>RIN\s+)[Ii](\d+)|$1$2|;
+			$oneline =~ s|(whipple\.org/)[Ii](\d+)|$1$2|g;
+		    }
+		    if ($oneline =~ m/View this person at iWhipple\.org/) {
+			$oneline =~ s|(i[Ww]hipple.org/)[Ii](\d+)|$1$2|g;
+		    }		    
+		    if ($oneline =~ m/\(Quick links[:]/) {
+			$oneline =~ s|(i?[Ww]hipple.org/)[Ii](\d+)|$1$2|g;
+			if (defined($allgoogmarkers) && length($allgoogmarkers)) {
+			    $oneline =~ s/<\/div><\/div>/$googmapsoutline/;
+			}
+		    }
+		    if ($oneline =~ /^<meta name/i) {
+			# Output the date meta tags just before the other ones.
+			unless ($didDates ) {
+			    if ($dateTags !~ m/^\s*$/) {
+				print OUTFILE "$dateTags";
+			    }
+			    if ($placeTags !~ m/^\s*$/) {
+				print OUTFILE "$placeTags";
+			    }
+			    if ($allplaces !~ m/^\s*$/) {
+				print OUTFILE "<meta name=\"allplaces\" content=\"${allplaces}\" />\n";
+			    }
+			    $didDates = 1;
+			}
+			$oneline = &processLine($oneline);
+		    }
+		    # If line is </head>, put all the script stuff out to the file
+		    if ($oneline =~ m/^\s*<\/head>\s*/i) {
+			if (scalar(keys %mapplacehash)) {
+			    print OUTFILE <<'__SCRIPT__';
+<script Language="JavaScript">
+if (top.frames.length!=0) {
+  if (window.location.href.replace)
+      top.location.replace(self.location.href);
+  else
+      top.location.href=self.document.href;
+}
+</script>
+<script Language="JavaScript" src="http://genweb.whipple.org/js/gotorinswish.js"></script>
+<script src="http://maps.google.com/maps?file=api&amp;v=2&amp;key=ABQIAAAAYHJgs9tZtjUwceKaExGARhQQaWGGOMtDWGmh7Aon-uxKHLcfkRQaWpfPk15sv122Pj8eduHh5QefDQ&sensor=false"
+        type="text/javascript"></script>
+<script type="text/javascript" src="http://genweb.whipple.org/js/googlemaps.js"></script>
+<style type="text/css">
+@media all and (max-width:1200px) {
+   .hidemap { display:none; }
+}
+</style>
+__SCRIPT__
+			}
+		    }
+		    if ($oneline =~ m/^\s*<body\s/i) {
+			$oneline = '<body bgcolor="#FFFFFF"';
+			if (scalar(keys %mapplacehash)) {
+			    $oneline .= ' onload="initialize();';
+			    foreach my $place (keys %mapplacehash) {
+				if ($place ne $googcenterplace) { # Save center place untiil last
+				    $oneline .= ' showAddress(\'' . $place . '\',\'' . $mapplacehash{$place} . '\');'; 
+				}
+			    }
+			    # Put the center place last
+			    $oneline .= ' showAddress(\'' . $googcenterplace . '\',\'' 
+				. $markermap{$googcenter_event_type} . '\');" onunload="GUnload()"' . "\n";
+			}
+			$oneline .= '>';
+		    }
+		    print OUTFILE "$oneline";
+		}
+		close(OUTFILE);
+	    }
+	    chdir "../";
+	}
+    }
+}
+
+# Passed the current google map center place and its event type,
+# as well as a candidate place and type, return the most relevant
+# place and type.
+sub  most_relevant_place {
+    my ($googcenterplace, $googcenter_event_type, $candidate_googplace, $candidate_eventtype) = @_;
+    unless (defined($candidate_eventtype) && length($candidate_eventtype)) {
+	# If candidate info is incomplete, return the current center place and type
+	return ($googcenterplace, $googcenter_event_type);
+    }
+
+    my $cur_comma_count = num_commas($googcenterplace);
+    my $cand_comma_count = num_commas($candidate_googplace);
+
+    # Account for burial places, which often have cemetery name
+    if (($cur_comma_count > 2) && ($googcenter_event_type eq 'BURIAL')) {
+	$cur_comma_count = 2;
+    }
+    if (($cand_comma_count > 2) && ($candidate_eventtype eq 'BURIAL')) {
+	$cand_comma_count = 2;
+    }
+    
+    # If one has more commas than the other, prefer it.
+    unless ($cur_comma_count == $cand_comma_count) {
+	if ($cur_comma_count > $cand_comma_count) {
+	    return ($googcenterplace, $googcenter_event_type);
+	}
+	else {
+	    return ($candidate_googplace, $candidate_eventtype);
+	}
+    }
+
+    # Both places have the same comma count.
+    # Let's prefer in this order:
+    # BIRTH, CHRISTENING, MARRIAGE, DEATH, BURIAL
+    # Since the candidate events are encountered in the above
+    # order, it means that the one already in $googcenterplace is
+    # preferred
+    return ($googcenterplace, $googcenter_event_type);
+}
+
+# How many commas in a string?
+#
+sub num_commas {
+    my ($instring) = @_;
+    unless (defined($instring) && length($instring)) {
+	return 0;
+    }
+    my $num = 0;
+
+    $num++ while ($instring =~ m/,/g);
+
+    return $num;
+}
+
+sub processLine {
+    my $line = shift;
+    my $tagpfx;
+    my $tagname;
+    my $tagmidfx;
+    my $tagcontent;
+    my $tagpostfx;
+    my $sdxtagname;
+    my $sdxtagcontent;
+    my @codes;
+    # Do we need to add a soundex meta tag?
+    if ($line =~ /^(<meta name=\")([^R][^"]+)(\" +Content=\")(.+)(\".*)/i) {
+        undef @codes;
+        $tagpfx = $1;
+	$tagname = $2;
+        $tagmidfx = $3;
+	$tagcontent = $4;
+        $tagpostfx = $5;
+
+	$tagcontent =~ s/  +/ /g; # Change double spaces to spaces
+	$tagcontent =~ s/["()]//g; # Get rid of quotes and parens
+	$tagcontent =~ s/^ +| +$//g; # Delete leading/trailing spaces
+        $line = $tagpfx . $tagname . $tagmidfx . $tagcontent . $tagpostfx;
+
+	$sdxtagname = $tagname . 'Sdx';
+	$sdxtagcontent = $tagcontent;
+	$sdxtagcontent =~ s/-/ /g; # Change hyphens to spaces for soundexing
+	$sdxtagcontent =~ s/[']//g; # Get rid of apostrophes (O'Brien)
+	
+	local $^W = 0;
+	# Now convert to soundex:
+	# Using ' ' as first arg (instead of / /) has special meaning
+	@codes = soundex( split(' ', $sdxtagcontent));
+
+	# Convert array back to scaler
+	$sdxtagcontent = join(' ', @codes);
+
+	$line = $line . "<meta name=\"${sdxtagname}\" content=\"${sdxtagcontent}\" />\n";
+    }
+    return $line;
+}
+
+#################################################################
+## Process a line that contains a BIRTH, CHRISTENING, DEATH or BURIAL date
+## 1/22/2012: Add MARRIAGE
+## Return a meta tag that contains the requested information
+sub processDate {
+    my $line = shift;
+    my $processAs = shift;
+    my $rettags = "";		# What we'll return
+
+    # Do we need to add a year meta tag?
+    # 11/11/2013: If contains a slashed year, create TWO metatags
+    if ($line =~ /^<li><em>(BIRTH|CHRISTENING|MARRIAGE|DEATH|BURIAL)<\/em>: [^,]*?(\d{3,4})(\/(\d{3,4}))?/i) {
+	# First a tag with a single year. (or slashed year)
+	my $eventtype = $1;
+	my $theyear = $2;
+	my $slashed_year = $4;	# Possibly undefined if not slashed
+	if ($processAs !~ m/^\s*$/) {
+	    $eventtype = $processAs;
+	}
+	$rettags = "<meta name=\"${eventtype}\" content=\"${theyear}\" />";
+	if (defined($slashed_year) && length($slashed_year)) {
+	    $rettags .= "<meta name=\"${eventtype}\" content=\"${slashed_year}\" />";
+	}
+
+	# Now get a range from 10 years before to 10 years after, and add that meta tag
+	my $therange = get21($theyear);
+	$rettags .= "<meta name=\"${eventtype}" . "range\" content=\"${therange}\" />\n";
+    }
+    return $rettags;
+}
+
+
+# Passed a 4-digit year, return a blank-separated list of the 10 previous and 10 following
+# years (with the original year in the middle)
+sub get21 {
+    my $original = shift;
+    my $retstring = "";
+    for (my $i = $original-10; $i <= $original+10; $i++) {
+	$retstring .= $i . " ";
+    }
+    return $retstring;
+}
+
+#################################################################
+## Process a line that contains a BIRTH, CHRISTENING, DEATH or BURIAL place
+## or a MARRIAGE place
+## Return a meta tag that contains the place
+sub processPlace {
+    my $line = shift;
+    my $rettags = "";		# What we'll return
+    my $googmarker = '';	# This is to place that we'll pass to Google maps
+    my $googplace = '';
+
+    # Do we need to add a place meta tag?
+    if ($line =~ /^<li><em>(BIRTH|CHRISTENING|MARRIAGE|DEATH|BURIAL)<\/em>: (.+)$/i) {
+
+	my $eventtype = $1;	# BIRTH, CHRISTENING, DEATH or BURIAL ... or MARRIAGE
+	my $info = $2;		# Potentially date and place
+	my $placeinfo = "";
+	# Does the info consist of a date and (perhaps a comma and more information (place))?
+	if ($info =~ m/^[^,]*?\d{3,4}[^,]*(,.*)?$/) {
+	    $placeinfo = $1;
+	}
+	else {			# No preceding date; all is place
+	    $placeinfo = $info;
+	}
+
+	if (defined($placeinfo)) {
+	    my @place_parts = split(',', $placeinfo); # A copy for Google maps marker
+
+	    # Metatags don't have MARRIAGE places (yet, at least)  
+#	    if ($eventtype ne 'MARRIAGE') {
+            # 2012-01-22: Add MARRIAGEplace meta tag
+            $placeinfo =~ s/[,"']//g;	# Get rid of commas
+            
+            if ($placeinfo !~ m/^\s*$/) {
+                $rettags = "<meta name=\"${eventtype}" . "place\" content=\"${placeinfo}\" />\n";
+                $allplaces .= " $placeinfo";
+            }
+
+#	    }
+	    
+	    # Let's see if we have a place that might be interesting to Google Maps
+	    my $num_placeparts = scalar(@place_parts);
+	    if ($num_placeparts) {
+		for (my $i = 0; $i < $num_placeparts; $i++) {
+		    $place_parts[$i] =~ s/^\s+(.*)$/$1/; # Delete leading whitespace at front
+		    # Delete of, near, prob, poss, (etc) prefixes.
+		    $place_parts[$i] =~ s/^\s*(?:of|near|prob|poss)\b.*$//i;
+		}
+
+		my $states = 'Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|'
+		    . 'Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|'
+		    . 'Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|'
+		    . 'Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|'
+		    . 'North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|'
+		    . 'South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|'
+		    . 'Wisconsin|Wyoming';
+
+                if ($num_placeparts >= 4) {
+                    if (($place_parts[$num_placeparts-1] =~ m/$states/) 
+                        && (length($place_parts[$num_placeparts-2]))
+                        && (!length($place_parts[$num_placeparts-3]))) {
+                        $place_parts[$num_placeparts-2] .= " County";
+                    } 
+                }
+
+		my $found_nonzero_length = 0; # Haven't found non-zero-length string yet
+		for(my $i = 0; $i < $num_placeparts; $i++) {
+		    if (length($place_parts[$i])) {
+			$found_nonzero_length = 1; # We found one!
+		    }
+		    $googplace .= $place_parts[$i];
+		    if (($i != ($num_placeparts -1)) && $found_nonzero_length) {
+			$googplace .= ',';
+		    }
+		}
+
+		# Delete of, near, prob, poss, prefixes
+#		$googplace =~ s/^\s*(?:of|near|prob|poss)[,]\s*(.*)/$1/;
+		$googplace =~ s/\s+/\+/g; # Change spaces to plus
+#		$googplace =~ s/\'/&apos;/g; # Change single quote to &apos;
+		$googplace =~ s/\'//g; # Remove apostrophes
+		# Replace trailing England with UK
+		if (($googplace =~ m/^England$/i) || ($googplace =~ m/[,]England$/i)) {
+		    $googplace =~ s/England$/UK/i;
+                }
+                elsif (($googplace =~ m/Comstock\+Cemetery,\+*Depot\+Road\+and\+Peter\+Avenue,\+*Montville,\+*New\+London,\+*Connecticut$/i)
+		       || ($googplace =~ m/Uncasville\+Cemetery,\+*Montville,\+*New\+London,\+*Connecticut$/i)) {
+#                    $googplace =~ s/Comstock\+Cemetery,\+*Depot\+Road\+and\+Peter\+Avenue,\+*Montville,\+*New\+London,\+*Connecticut/Peter\+Avenue,Montville,CT/i;
+                    $googplace = 'Peter+Avenue,Montville,CT';
+                }
+
+		$googmarker = '&markers=size:mid|color:red|label:' . $markermap{$eventtype} 
+		. '|' . $googplace;
+	    }
+	}
+    }
+    return ($rettags, $googmarker, $googplace);
+}
+
