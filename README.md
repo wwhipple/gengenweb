@@ -4,8 +4,8 @@ gengenweb began as a hack in 1994 at the birth of the Whipple Website (whipple.o
 
 This github project is a response to two kinds of stimuli:
 
-# Periodic requests for the author to share the code
-# A Hack-a-thon by the author's employer.
+* Periodic requests for the author to share the code
+* A Hack-a-thon by the author's employer.
 
 During the hack-a-thon several hard-codings have been eliminated.
 
