@@ -20,7 +20,7 @@ if ($ret) {
 
 $ret = insert_soundex_meta($opts);
 
-print "Generation complete.\n"
+print "Generation complete.\n";
 
 exit;
 
@@ -28,7 +28,7 @@ exit;
 # ;clean_ged - Clean out private info
 sub clean_ged {
     my $opts = shift;
-    if ($opts->{'noclean'} {
+    if ($opts->{'noclean'}) {
         return;
     }
 
@@ -102,6 +102,7 @@ sub validate_options {
         if ($opts->{'cleaned'} eq $opts->{'input'}) {
             die "Name of input file and file for intermediate \"cleaned\" "
                 . "GEDCOM file can't be the same.\n";
+	}
     }
 
     # Where is the home directory?
